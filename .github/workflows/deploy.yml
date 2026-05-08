@@ -1,0 +1,86 @@
+# Node.js Deploy Pipeline — Build, Push to ECR, Trigger ARIA Deployment
+# Triggers on push to main branch
+
+name: Deploy Node.js App
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tests/**'
+
+env:
+  # AWS_REGION: us-east-1
+  ECR_REPOSITORY: node-hello
+  # Note: These would need to be set up in your AWS account for ECS deployment
+  # ECS_CLUSTER: your-cluster-name
+  # ECS_SERVICE: your-service-name
+  # CONTAINER_NAME: node-hello
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build Docker image
+          # Assumes Dockerfile is in the repository root
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          # Push to ECR
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "image_uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Trigger ARIA deployment
+        id: trigger-aria
+        run: |
+          # Prepare payload for ARIA platform webhook
+          PAYLOAD='{"app":"node-hello","environment":"staging","imageUri":"${{ steps.build-image.outputs.image_uri }}","commitSha":"${{ github.sha }}","branch":"${{ github.ref_name }}","actor":"${{ github.actor }}"}'
+
+          # Compute HMAC signature using the webhook secret
+          SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "${{ secrets.GHREPO_WEBHOOK_SECRET }}" | awk '{print $2}')
+
+          # Send webhook to platform to trigger ARIA deployment
+          curl -sf -X POST "${{ secrets.PLATFORM_WEBHOOK_URL }}/api/agents/aria/proxy/github/deploy" \
+            -H "Content-Type: application/json" \
+            -H "X-Hub-Signature-256: sha256=$SIGNATURE" \
+            -H "X-Idempotency-Key: deploy-${{ github.run_id }}-${{ github.run_attempt }}" \
+            -d "$PAYLOAD"
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ steps.build-image.outputs.image_uri }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Actor**: \`${{ github.actor }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: staging" >> $GITHUB_STEP_SUMMARY
