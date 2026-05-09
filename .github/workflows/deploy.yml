@@ -63,8 +63,13 @@ jobs:
               "password": "${{ secrets.AUTH_PASSWORD }}"
             }')
 
-          # Extract token from response
-          JWT_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.token')
+          # Extract token from response (using accessToken instead of token)
+          if command -v jq >/dev/null 2>&1; then
+            JWT_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.accessToken')
+          else
+            # Fallback to sed if jq is not available
+            JWT_TOKEN=$(echo "$AUTH_RESPONSE" | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p')
+          fi
 
           # Check if we got a token
           if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
